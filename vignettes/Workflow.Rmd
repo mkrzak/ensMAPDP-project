@@ -1,0 +1,142 @@
+---
+title: "EnsMAP-DP: novel tool for detecting cell populations from scRNAseq data"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## Quick start
+The following script will execute a sequence of analysis steps and functions of ensMAPDP.
+
+First define the paths to ensMAPDP folder, Matlab executable file and your output directory where the program will output the analysis files. Then load the main functions of the method.
+
+```{r cars}
+
+program.path="/pathTotheProgram/ensMAPDP" 
+output.path="/pathToOutputResults/Results"
+matlab.path="/pathToMatlabExecutableFile/matlab" #in Ubuntu usually it is: /usr/local/bin/matlab
+
+source(paste0(program.path, "/R/ensMAPDP.R"))
+```
+
+The ensMAPDP method offers two analysis modes. The first mode is a step-by-step analysis of the single-cell RNAseq count matrix that calls a series of functions to perform subsequent steps of the algorithm. The second mode is an all-in-one analysis that calls only one function to the perform full analysis at once (from data preprocessing to cluster ensemble). In both cases, the user can tune any parameters of any stage of the process.
+
+# Input
+
+The ensMAPDP requires to input scRNAseq dataset in the form of a raw count matrix. Here, I will use the example of real scRNAseq dataset from the Klein et al 2015 study, previously denoted as Klein2015. Klein2015 dataset contains the expression of 2717 mouse embryonic stem cells that underwent differentiation. The example data file is the quality controlled matrix of Raw UMI counts stored in SingleCellExperiment object. 
+
+First, load .Rdata file and retrieve the matrix stored in the counts slot of SingleCellExperiment object.
+
+
+```{r pressure, echo=FALSE}
+load("/pathTotheProgram/ensMAPDP/data/Klein2015.Rdata")
+
+counts(sce)[1:5,1:5]
+dim(sce)
+table(sce$Group)
+```
+
+In the above matrix, rows correspond to the genes and columns correspond to the cells. The matrix contains the expression of 24047 genes. The object, apart from the count matrix stores also the cell group annotation (in the slot Group). The annotated groups are the four-time points of differentiation (denoted as d0, d2, d4, d7) which contain different numbers of cells. Further, I will use this annotation to visually inspect the accuracy of ensMAPDP clusterization. 
+
+
+##Running step-by-step ensMAPDP functions
+
+Before running the four main procedures, ensMAPDP allows preprocessing the matrix by filtering lowly expressed genes and normalizing counts with scran deconvolution method. To apply filtering and normalization, both parameters should be set to TRUE.  
+
+
+```{r pressure, echo=FALSE}
+D.prep <- preprocess(D=counts(sce), filter=TRUE, normalize=TRUE)
+D.prep[1:5,1:5] 
+dim(D.prep)
+```
+
+The resulting filtered and normalized count matrix will be used as input for the next function. Note that filtering here did not remove any features. That is because the example matrix was already quality controlled and lowly expressed genes were removed prior analysis.
+
+In the next step, ensMAPDP uses topFeatures function to select a user-specified number of genes (parameter nrFeatures) with the highest variance on a log scale. The output of this function is the matrix subject to these top variable genes.
+
+
+
+```{r pressure, echo=FALSE}
+D.sub <- topFeatures(D.prep, nrFeatures=600)
+D.sub[1:5,1:5]
+dim(D.sub)
+```
+
+A feature selected count matrix is further used in the reduceDimension function. Note that the method requires to specify the dimension reduction technique, among tSNE and UMAP, and the number of projections to be performed (by setting parameter nrProjections to a preferred value). Note that the higher the number of projections, the more stable will be later the clustering solution. However, to obtain a large number of projections, the method may require a substantial amount of time.
+
+
+```{r pressure, echo=FALSE}
+D.proj <- reduceDimension(D.sub, dim.method="tSNE", nrProjections=5)
+D.proj[[1]][1:5,1:3]
+dim(D.proj[[1]])
+```
+
+The resulting object is a list of 5 projection matrices with the number of rows equal to the number of cells and number of columns equal to the number of retrieved dimensions. When using tSNE, a default value of 3 dimensions are retrieved, when using UMAP matrices have 2 dimensions. 
+
+In the next step, cells in each of the 5 projections are clustered using MAP-DP algorithm. Note that in this step is partially implemented in the Matlab and the execution of the clusterIndividual function requires this computing environment to be installed. The method requires to set values for two hyperparameters of the model N_0 and pB_0. For N_0, I will use a default value of 4.4, for pB_0, I will use setting pB0=0.3.
+
+
+```{r pressure, echo=FALSE}
+D.ind.clust <- clusterIndividual(D.proj, N0=4.4, pB0=0.3)
+table(D.ind.clust[[1]])
+length(D.ind.clust)
+```
+
+clusterIndividual function outputs the list of the clustering solutions for each of the projection (so the length of the list is equal to the number of projections supplied to the function). Here we can see that 4 clusters were identified from the first partition and how many cells were assigned to each of the four clusters. Rest of the elements in the list contain other clustering solutions (for the rest of the projections).  
+
+The last step of ensMAPDP algorithm is the ensemble of individual clustering solutions into a final partition of the dataset. clusterEnsemble is a wrapper function of the SAFE package MCLA ensemble algorithm. It is a graph-based method that assigns the cells to the clusters that were participated the most strongly across all individual clustering solutions. The resulting vector of clusterEnsemble function contains cell names and the associated cluster label. 
+
+
+```{r pressure, echo=FALSE}
+D.ens.clust <- clusterEnsemble(D.ind.clust)
+D.ens.clust[1:5]
+table(D.ens.clust)
+```
+
+##Additional ensMAPDP function for plotting
+
+To inspect the result of clustering, the ensMAPDP method implements a ggplot-based function plotResult which draws a scatterplot of the first two dimensions of the projection and color the data points (herein cells) by the cluster assignment. The input for this function is one of the resulting projections (elements of the list) obtained in the dimension reduction step and the final clustering vector obtained from the cluster ensemble step. Note that one can modify the title of the plot.
+
+```{r pressure, echo=FALSE}
+plotResult(projection=D.proj[[1]], clustering=D.ens.clust, title="Klein2015 dataset in reduced dimension colored by clustering result")
+```
+
+The figure above shows 2712 cells colored by four clusters identified with ensMAPDP algorithm when applied to Klein2015 scRNAseq dataset. Since the original data structure contained also the annotation of the dataset (in the Group slot of sce SingleCellExperiment object), I will use it to visually inspect the similarity of annotation to my clustering solution. Note that in real-life applications this information is not available. 
+
+```{r pressure, echo=FALSE}
+plotResult(projection=D.proj[[1]], clustering=sce$Group, title="Klein2015 dataset in reduced dimension colored by annotation")
+```
+
+
+The identified clusters by ensMAPDP are very similar to the dataset annotation. It means that the method was highly accurate in detecting cell populations in the Klein2015 dataset. Note that the difference in the colors between both plots is not important (any color can code the label/annotation names). The important is how many cells were assigned to these colors in each plot. 
+
+To compute ARI index between the two partitions (clustering and data annotation) one can use the adjustedRandIndex function from the mclust package.
+
+```{r pressure, echo=FALSE}
+library(mclust)
+adjustedRandIndex(D.ens.clust, sce$Group)
+```
+
+ARI >0.9 confirms that ensMAPDP method accurately detected four annotated cell populations in the Klein2015 dataset. 
+
+##All-in-one ensMAPDP analysis
+
+To perform all the above analysis in one step, ensMAPDP implements ensMAPDP function which calls a sequence of the procedures to obtain the final clusterization of the dataset. The user can tune any parameter required at each step and the output of this function is a vector containing the cell names and the associated cluster label.
+
+```{r pressure, echo=FALSE}
+D.ens.clust = ensMAPDP(counts(sce), filter=TRUE, normalize=TRUE, nrFeatures=600, dim.method="tSNE", nrProjections=5, N0=4.4, pB0=0.3) 
+```
+
+Note that the result of the all-in-one analysis is not the same as in step-by-step analysis. That is because ensMAPDP is stochastic (because of tSNE/UMAP algorithms) and each time being ran (even on the same dataset with the same parameter settings), will produce a slightly different result. To reproduce the results of ensMAPDP one can set the seed for random number generation before the analysis.
+
+
+
+
+
+
+
+
+
